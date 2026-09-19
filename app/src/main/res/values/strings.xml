@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">qrxx</string>
+
+    <string name="hint">QR コードにかざすだけで開きます</string>
+
+    <string name="need_camera">カメラの使用を許可してください</string>
+    <string name="need_camera_body">QR コードを読み取るためにカメラを使います。撮った映像はこの端末の中だけで処理し、保存も送信もしません。</string>
+    <string name="open_settings">設定を開く</string>
+    <string name="grant">許可する</string>
+
+    <string name="camera_failed">カメラを開けませんでした</string>
+
+    <string name="torch">ライト</string>
+
+    <string name="copy">コピー</string>
+    <string name="share">共有</string>
+    <string name="close">閉じる</string>
+    <string name="copied">コピーしました</string>
+    <string name="open_anyway">それでも開く</string>
+    <string name="not_openable">開けるアプリがありません</string>
+</resources>

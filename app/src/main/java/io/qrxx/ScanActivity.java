@@ -68,8 +68,15 @@ public final class ScanActivity extends Activity {
     /** 同じコードを映し続けている間は開き直さない。画角から外れてこの時間が過ぎたら、また開く。 */
     private static final long REARM_MS = 1500L;
 
-    /** 復号に回す絵の大きさの目安。これ以上上げても読み取りはさほど良くならず、遅くなるだけ。 */
-    private static final int ANALYSIS_PIXELS = 1280 * 720;
+    /**
+     * 復号に回す絵の大きさの目安。
+     *
+     * パスキー (FIDO ハイブリッド) の QR は 49〜53 モジュールあり、URL の QR (33〜37) より
+     * ずっと密。720p だと画面高の 25% ほどまで近づけないと読めないが、1080p なら 15% で
+     * 読める = 1.7 倍遠くから合う。1 フレームあたりの復号は 2ms 程度増えるだけで、
+     * 30fps の 33ms にはまだ余裕がある。
+     */
+    private static final int ANALYSIS_PIXELS = 1920 * 1080;
 
     private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
@@ -100,7 +107,7 @@ public final class ScanActivity extends Activity {
     private CameraDevice device;
     private CameraCaptureSession session;
     private CaptureRequest.Builder request;
-    private ImageReader reader;
+    private volatile ImageReader reader;
     private Surface previewSurface;
     private boolean cameraOpening;
     private boolean torchOn;
@@ -134,6 +141,9 @@ public final class ScanActivity extends Activity {
         // 画面を組む前にカメラ側の下調べを済ませる。SurfaceView に渡す大きさもここで決まる。
         startWorkers();
         chooseCamera();
+        // 解析用の絵の置き場は数 MB ある。主スレッドで確保すると最初の一枚が遅れるので、
+        // カメラスレッドに逃がす。出来上がったら startSession() を呼び直す。
+        cameraHandler.post(this::createReader);
         buildUi();
     }
 
@@ -166,6 +176,10 @@ public final class ScanActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopWorkers();
+        if (reader != null) {
+            reader.close();
+            reader = null;
+        }
         super.onDestroy();
     }
 
@@ -593,16 +607,21 @@ public final class ScanActivity extends Activity {
         }
     };
 
+    /** 解析用の絵の置き場。大きさは変わらないので、画面が生きている間ずっと使い回す。 */
+    private void createReader() {
+        if (reader != null) return;
+        if (analysisSize == null) analysisSize = new Size(1280, 720);
+        final ImageReader created = ImageReader.newInstance(
+                analysisSize.getWidth(), analysisSize.getHeight(), ImageFormat.YUV_420_888, 2);
+        created.setOnImageAvailableListener(onFrame, decodeHandler);
+        reader = created;
+        ui.post(this::startSession);
+    }
+
     /** 映す面と読む面が両方そろってから、一度だけ組む。 */
     private void startSession() {
-        if (device == null || previewSurface == null || session != null) return;
-        if (analysisSize == null) analysisSize = new Size(1280, 720);
+        if (device == null || previewSurface == null || session != null || reader == null) return;
         try {
-            if (reader != null) reader.close();
-            reader = ImageReader.newInstance(analysisSize.getWidth(), analysisSize.getHeight(),
-                    ImageFormat.YUV_420_888, 2);
-            reader.setOnImageAvailableListener(onFrame, decodeHandler);
-
             request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             request.addTarget(previewSurface);
             request.addTarget(reader.getSurface());
@@ -665,10 +684,7 @@ public final class ScanActivity extends Activity {
             device.close();
             device = null;
         }
-        if (reader != null) {
-            reader.close();
-            reader = null;
-        }
+        // reader はそのまま残す。裏から戻ったときに確保し直さずに済む。
         request = null;
         if (torchOn) {
             torchOn = false;

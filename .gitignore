@@ -2,3 +2,7 @@
 build/
 app/build/
 local.properties
+keystore/
+keystore.properties
+*.iml
+.idea/

@@ -57,7 +57,13 @@ final class Opener {
         }
         if (blocked(scheme.toLowerCase(Locale.US))) return null;
 
-        final Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+        // QR の英数字モードは大文字なので、パスキーの QR は "FIDO:/..." と大文字で来る。
+        // Android の IntentFilter の scheme 照合は大文字小文字を区別するため、
+        // 小文字の scheme しか宣言していない受け手には そのままだと届かない。
+        // (Google Play 開発者サービスは fido と FIDO の両方を宣言しているが、
+        //  他の認証器が同じとは限らない。) RFC 3986 上 scheme の比較は
+        //  大文字小文字を問わないので、小文字に揃えてから渡す。
+        final Intent intent = new Intent(Intent.ACTION_VIEW, uri.normalizeScheme());
         // ブラウザから辿れる相手だけに限る。素性の知れない文字列で
         // 外から呼ばれる想定の無い画面を叩き起こさないための枷。
         intent.addCategory(Intent.CATEGORY_BROWSABLE);

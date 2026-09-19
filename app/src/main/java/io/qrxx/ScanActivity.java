@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
 import android.graphics.Insets;
+import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -33,10 +34,13 @@ import android.os.Process;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
+import android.util.Range;
 import android.util.Size;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -53,6 +57,7 @@ import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.Executor;
 
 /**
@@ -88,6 +93,8 @@ public final class ScanActivity extends Activity {
     private View flash;
     private TextView hint;
     private FrameLayout.LayoutParams hintParams;
+    private TextView zoomLabel;
+    private FrameLayout.LayoutParams zoomParams;
     private TextView torchButton;
     private FrameLayout.LayoutParams torchParams;
     private View scrim;
@@ -102,6 +109,14 @@ public final class ScanActivity extends Activity {
     private String cameraId;
     private int sensorOrientation = 90;
     private boolean hasFlash;
+    /** ズーム。倍率で指定できる端末 (API 30 以降) はそちら、駄目なら切り出し矩形で。 */
+    private boolean zoomByRatio;
+    private float zoom = 1f;
+    private float sentZoom = 1f;   // 実際にカメラへ送った倍率
+    private float minZoom = 1f;
+    private float maxZoom = 1f;
+    private Rect activeArray;
+    private ScaleGestureDetector pinch;
     private Size previewSize;
     private Size analysisSize;
     private CameraDevice device;
@@ -276,6 +291,34 @@ public final class ScanActivity extends Activity {
         root.addView(hint, hintParams);
         hint.animate().alpha(0f).setStartDelay(3200).setDuration(600).start();
 
+        // --- つまんでいる間だけ出る倍率表示。案内と同じ場所 ---
+        zoomLabel = new TextView(this);
+        zoomLabel.setTextColor(0xFFF2F2F5);
+        zoomLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
+        zoomLabel.setPadding(dp(18), dp(9), dp(18), dp(9));
+        zoomLabel.setBackground(pill(0x66000000));
+        zoomLabel.setAlpha(0f);
+        zoomLabel.setOnClickListener(v -> resetZoom());
+        zoomParams = new FrameLayout.LayoutParams(WRAP, WRAP,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        zoomParams.topMargin = dp(16);
+        root.addView(zoomLabel, zoomParams);
+
+        pinch = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(ScaleGestureDetector detector) {
+                onPinch(detector.getScaleFactor());
+                return true;
+            }
+
+            @Override
+            public void onScaleEnd(ScaleGestureDetector detector) {
+                flushZoom();
+            }
+        });
+        // 既定ではダブルタップ + 上下の動きでもズームする。意図せず効くと厄介なので切る。
+        pinch.setQuickScaleEnabled(false);
+
         // --- ライト ---
         torchButton = new TextView(this);
         torchButton.setText(R.string.torch);
@@ -311,8 +354,10 @@ public final class ScanActivity extends Activity {
                 bottom = insets.getSystemWindowInsetBottom();
             }
             hintParams.topMargin = top + dp(16);
+            zoomParams.topMargin = top + dp(16);
             torchParams.bottomMargin = bottom + dp(28);
             hint.requestLayout();
+            zoomLabel.requestLayout();
             torchButton.requestLayout();
             panel.setPadding(dp(20), dp(18), dp(20), bottom + dp(18));
             permissionBox.setPadding(dp(30), top + dp(30), dp(30), bottom + dp(30));
@@ -463,6 +508,7 @@ public final class ScanActivity extends Activity {
             if (orientation != null) sensorOrientation = orientation;
             final Boolean flashAvailable = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
             hasFlash = flashAvailable != null && flashAvailable;
+            readZoomRange(c);
 
             final StreamConfigurationMap map =
                     c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
@@ -519,6 +565,115 @@ public final class ScanActivity extends Activity {
             }
         }
         return best != null ? best : sizes[0];
+    }
+
+    /**
+     * この端末でどこまでズームできるかを読む。
+     *
+     * API 30 以降の CONTROL_ZOOM_RATIO は、望遠レンズへの切り替えまで含めて
+     * 端末が面倒を見てくれる。使えない端末では、撮像面の一部だけを切り出す
+     * SCALER_CROP_REGION に落とす (こちらは digital zoom だけ)。
+     */
+    private void readZoomRange(CameraCharacteristics c) {
+        zoomByRatio = false;
+        minZoom = 1f;
+        maxZoom = 1f;
+        activeArray = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            final Range<Float> range = c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
+            if (range != null && range.getUpper() > range.getLower()) {
+                minZoom = range.getLower();
+                maxZoom = range.getUpper();
+                zoomByRatio = true;
+            }
+        }
+        if (!zoomByRatio) {
+            final Float maxDigital = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
+            if (maxDigital != null && maxDigital > 1f && activeArray != null) {
+                maxZoom = maxDigital;
+            }
+        }
+        zoom = clamp(1f);
+        sentZoom = zoom;
+    }
+
+    private float clamp(float value) {
+        return Math.max(minZoom, Math.min(maxZoom, value));
+    }
+
+    private boolean canZoom() {
+        return maxZoom > minZoom + 0.01f;
+    }
+
+    /** 今の倍率を撮影要求に載せる。applyRepeating() から毎回呼ぶので、ずれない。 */
+    private void applyZoom(CaptureRequest.Builder builder) {
+        if (zoomByRatio) {
+            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom);
+            return;
+        }
+        if (activeArray == null) return;
+        final int w = Math.max(1, Math.round(activeArray.width() / zoom));
+        final int h = Math.max(1, Math.round(activeArray.height() / zoom));
+        final int left = activeArray.left + (activeArray.width() - w) / 2;
+        final int top = activeArray.top + (activeArray.height() - h) / 2;
+        builder.set(CaptureRequest.SCALER_CROP_REGION, new Rect(left, top, left + w, top + h));
+    }
+
+    /** つまむ動きは画面のどこで始まってもよいので、触りの入口で横取りする。 */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (pinch != null && canZoom()) pinch.onTouchEvent(event);
+        return super.dispatchTouchEvent(event);
+    }
+
+    /**
+     * つまむ動きは 1 回ごとに「前回からの比」で来るので、小さすぎるからと捨てると
+     * その分の動きが永久に失われる。倍率そのものは毎回きちんと積み、
+     * カメラへ送るのだけを間引く。指を止めていても微細な揺れで毎秒 30 回ほど
+     * 呼ばれるので、そのまま投げると要求を作っては捨てるだけになる。
+     */
+    private void onPinch(float factor) {
+        final float next = clamp(zoom * factor);
+        if (next == zoom) return;
+        zoom = next;
+        showZoom();
+        if (Math.abs(zoom - sentZoom) >= sentZoom * 0.004f) {
+            sentZoom = zoom;
+            applyRepeating();
+        }
+    }
+
+    /** 指を離したところで、間引いて送れていなかった分を送る。 */
+    private void flushZoom() {
+        if (zoom == sentZoom) return;
+        sentZoom = zoom;
+        applyRepeating();
+    }
+
+    /**
+     * 倍率を出す。等倍に戻るまでは消さない。
+     * ズームしたままだと次に開いたときに戸惑うので、今どうなっているかは見えていてほしい。
+     */
+    private void showZoom() {
+        if (zoomLabel == null) return;
+        // 案内が出ている最中なら引っ込める。同じ場所に重ねない。
+        hint.animate().cancel();
+        hint.setAlpha(0f);
+        zoomLabel.setText(String.format(Locale.US, "%.1fx", zoom));
+        zoomLabel.animate().cancel();
+        zoomLabel.setAlpha(1f);
+        if (Math.abs(zoom - 1f) < 0.05f) {
+            zoomLabel.animate().alpha(0f).setStartDelay(1200).setDuration(400).start();
+        }
+    }
+
+    private void resetZoom() {
+        if (!canZoom()) return;
+        zoom = clamp(1f);
+        sentZoom = zoom;
+        applyRepeating();
+        showZoom();
     }
 
     private int displayRotation() {
@@ -664,6 +819,7 @@ public final class ScanActivity extends Activity {
         if (session == null || request == null) return;
         request.set(CaptureRequest.FLASH_MODE,
                 torchOn ? CameraMetadata.FLASH_MODE_TORCH : CameraMetadata.FLASH_MODE_OFF);
+        applyZoom(request);
         try {
             session.setRepeatingRequest(request.build(), null, cameraHandler);
         } catch (CameraAccessException | IllegalStateException e) {

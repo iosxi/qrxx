@@ -95,6 +95,8 @@ public final class ScanActivity extends Activity {
     private FrameLayout.LayoutParams hintParams;
     private TextView zoomLabel;
     private FrameLayout.LayoutParams zoomParams;
+    private TextView[] zoomButtons = new TextView[0];   // [i] が (i + 1) 倍
+    private FrameLayout.LayoutParams zoomRowParams;
     private TextView torchButton;
     private FrameLayout.LayoutParams torchParams;
     private View scrim;
@@ -331,6 +333,13 @@ public final class ScanActivity extends Activity {
         root.addView(torchButton, torchParams);
         updateTorchLook();
 
+        // --- 倍率の即決ボタン。つまむより速い。上限は起動時に読み済みの値なので、追加の問い合わせは無い ---
+        final LinearLayout zoomRow = buildZoomRow();
+        zoomRowParams = new FrameLayout.LayoutParams(WRAP, WRAP,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        zoomRowParams.bottomMargin = zoomRowBottom(0);
+        if (zoomRow != null) root.addView(zoomRow, zoomRowParams);
+
         // --- 開けなかったときだけ出る、文字の受け皿 ---
         scrim = new View(this);
         scrim.setBackgroundColor(0xB3000000);
@@ -356,6 +365,7 @@ public final class ScanActivity extends Activity {
             hintParams.topMargin = top + dp(16);
             zoomParams.topMargin = top + dp(16);
             torchParams.bottomMargin = bottom + dp(28);
+            zoomRowParams.bottomMargin = zoomRowBottom(bottom);
             hint.requestLayout();
             zoomLabel.requestLayout();
             torchButton.requestLayout();
@@ -365,6 +375,50 @@ public final class ScanActivity extends Activity {
         });
 
         setContentView(root);
+    }
+
+    /**
+     * 1x から、この端末で届く整数倍 (8x まで) を並べる。2 つ未満なら並べない。
+     * 幅 360dp の画面にも 8 つ収まる大きさにしてある。
+     */
+    private LinearLayout buildZoomRow() {
+        final int count = canZoom() ? Math.min(8, (int) Math.floor(maxZoom + 0.01f)) : 0;
+        if (count < 2 || minZoom > 1f + 0.01f) return null;
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(4), dp(4), dp(4), dp(4));
+        row.setBackground(pill(0x66000000));
+        zoomButtons = new TextView[count];
+        for (int i = 0; i < count; i++) {
+            final int times = i + 1;
+            final TextView b = new TextView(this);
+            b.setText(times + "x");
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+            b.setGravity(Gravity.CENTER);
+            b.setOnClickListener(v -> setZoom(times));
+            row.addView(b, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            zoomButtons[i] = b;
+        }
+        updateZoomButtons();
+        return row;
+    }
+
+    /**
+     * 倍率ボタンの列を、ライトの 12dp 上に置く。ライトの高さは文字の大きさの設定で
+     * 変わるので、決め打ちせずに測る (XQ-FS44 の既定で 54dp)。
+     */
+    private int zoomRowBottom(int systemBottom) {
+        torchButton.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        return systemBottom + dp(28) + torchButton.getMeasuredHeight() + dp(12);
+    }
+
+    /** 今の倍率に一致するボタンだけを白く塗る。つまんで半端な倍率なら、どれも塗らない。 */
+    private void updateZoomButtons() {
+        for (int i = 0; i < zoomButtons.length; i++) {
+            final boolean on = Math.abs(zoom - (i + 1)) < 0.05f;
+            zoomButtons[i].setBackground(on ? pill(0xE6FFFFFF) : null);
+            zoomButtons[i].setTextColor(on ? 0xFF16161C : 0xFFF2F2F5);
+        }
     }
 
     private GradientDrawable pill(int color) {
@@ -657,6 +711,7 @@ public final class ScanActivity extends Activity {
      */
     private void showZoom() {
         if (zoomLabel == null) return;
+        updateZoomButtons();
         // 案内が出ている最中なら引っ込める。同じ場所に重ねない。
         hint.animate().cancel();
         hint.setAlpha(0f);
@@ -669,8 +724,12 @@ public final class ScanActivity extends Activity {
     }
 
     private void resetZoom() {
+        setZoom(1f);
+    }
+
+    private void setZoom(float value) {
         if (!canZoom()) return;
-        zoom = clamp(1f);
+        zoom = clamp(value);
         sentZoom = zoom;
         applyRepeating();
         showZoom();
